@@ -35,7 +35,8 @@ def run(input_data: Union[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
             "document_name": input_data.get("document_name", ""),
             "document_year": input_data.get("document_year", ""),
             "document_entity": input_data.get("document_entity", ""),
-            "source_uri": input_data.get("source_uri", "")
+            "source_uri": input_data.get("source_uri", ""),
+            "document_id": input_data.get("document_id")
         }
     else:
         raise ValueError(f"Invalid input type: {type(input_data)}")

@@ -10,16 +10,28 @@ from ..orchestrator import RetryableError
 logger = logging.getLogger(__name__)
 
 
-def run(chunks: List[Dict[str, Any]]) -> None:
+def run(input_data: Dict[str, Any]) -> None:
     """
     Upserts document chunks into Azure Cognitive Search index.
+    If document_id is provided, deletes existing chunks for that document first.
     
     Args:
-        chunks: List of chunk dictionaries with content, metadata, and embeddings
+        input_data: Dictionary containing:
+            - chunks: List of chunk dictionaries with content, metadata, and embeddings
+            - document_id: (Optional) Document ID to delete existing chunks for
         
     Raises:
         RetryableError: For transient failures that should be retried
     """
+    # Parse input
+    if isinstance(input_data, list):
+        # Backward compatibility for direct list of chunks
+        chunks = input_data
+        document_id = None
+    else:
+        chunks = input_data.get("chunks", [])
+        document_id = input_data.get("document_id")
+    
     logger.info(f"Pushing {len(chunks)} chunks to search index")
     
     try:
@@ -30,6 +42,11 @@ def run(chunks: List[Dict[str, Any]]) -> None:
         
         if not search_endpoint or not search_key:
             raise ValueError("Azure Cognitive Search credentials not configured")
+            
+        # If document_id is provided, delete existing chunks for this document
+        if document_id:
+            logger.info(f"Deleting existing chunks for document {document_id}")
+            delete_document_chunks(document_id, search_endpoint, search_key, index_name)
         
         # Process chunks in batches to avoid throttling
         batch_size = 50  # Adjust based on your rate limits
@@ -98,6 +115,7 @@ def push_batch_to_index(
             "document_year": chunk.get("document_year", ""),
             "document_entity": chunk.get("document_entity", ""),
             "source_uri": chunk.get("source_uri", ""),
+            "document_id": chunk.get("document_id", ""),
         }
         documents.append(document)
     
@@ -264,6 +282,14 @@ def create_index(
                 "filterable": True,
                 "sortable": False,
                 "facetable": False
+            },
+            {
+                "name": "document_id",
+                "type": "Edm.String",
+                "searchable": False,
+                "filterable": True,
+                "sortable": False,
+                "facetable": False
             }
         ],
         "vectorSearch": {
@@ -328,6 +354,95 @@ def create_index(
         raise Exception(error_msg)
     
     logger.info(f"Successfully created index {index_name}")
+
+
+def delete_document_chunks(
+    document_id: str,
+    search_endpoint: str,
+    search_key: str,
+    index_name: str
+) -> None:
+    """
+    Delete all chunks for a specific document from the search index.
+    
+    Args:
+        document_id: Document ID to delete chunks for
+        search_endpoint: Azure Cognitive Search endpoint
+        search_key: Azure Cognitive Search admin key
+        index_name: Name of the search index
+    """
+    # Ensure the index exists
+    ensure_index_exists(search_endpoint, search_key, index_name)
+    
+    # Prepare the filter query
+    filter_query = f"document_id eq '{document_id}'"
+    
+    # First, get all document IDs that match the filter
+    url = f"{search_endpoint}/indexes/{index_name}/docs/search?api-version=2023-07-01-Preview"
+    headers = {
+        "Content-Type": "application/json",
+        "api-key": search_key
+    }
+    payload = {
+        "search": "*",
+        "filter": filter_query,
+        "select": "id",
+        "top": 1000  # Adjust based on your expected number of chunks per document
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=60)
+        
+        if response.status_code != 200:
+            error_msg = f"API error when searching for chunks to delete: {response.status_code} - {response.text}"
+            logger.error(error_msg)
+            raise Exception(error_msg)
+        
+        result = response.json()
+        
+        # Extract document IDs
+        chunk_ids = [doc["id"] for doc in result.get("value", [])]
+        
+        if not chunk_ids:
+            logger.info(f"No chunks found for document {document_id}")
+            return
+        
+        logger.info(f"Found {len(chunk_ids)} chunks to delete for document {document_id}")
+        
+        # Delete chunks in batches
+        batch_size = 50  # Adjust based on your rate limits
+        for i in range(0, len(chunk_ids), batch_size):
+            batch = chunk_ids[i:i + batch_size]
+            
+            # Prepare delete actions
+            delete_actions = []
+            for chunk_id in batch:
+                delete_actions.append({
+                    "@search.action": "delete",
+                    "id": chunk_id
+                })
+            
+            # Delete batch
+            delete_url = f"{search_endpoint}/indexes/{index_name}/docs/index?api-version=2023-07-01-Preview"
+            delete_payload = {
+                "value": delete_actions
+            }
+            
+            delete_response = requests.post(delete_url, headers=headers, json=delete_payload, timeout=60)
+            
+            if delete_response.status_code not in [200, 207]:
+                error_msg = f"API error when deleting chunks: {delete_response.status_code} - {delete_response.text}"
+                logger.error(error_msg)
+                raise Exception(error_msg)
+            
+            # Add a small delay between batches to avoid throttling
+            time.sleep(1)
+        
+        logger.info(f"Successfully deleted {len(chunk_ids)} chunks for document {document_id}")
+        
+    except Exception as e:
+        logger.error(f"Error deleting chunks for document {document_id}: {str(e)}")
+        raise
 
 
 def is_transient_error(error: Exception) -> bool:

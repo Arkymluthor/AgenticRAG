@@ -19,7 +19,28 @@ def orchestrator_function(context: df.DurableOrchestrationContext) -> List[Dict[
     """
     Orchestrator function that coordinates the document processing pipeline.
     """
-    blob_uri = context.get_input()
+    input_data = context.get_input()
+    
+    # Handle both string input (blob URI) and dictionary input
+    if isinstance(input_data, str):
+        blob_uri = input_data
+        document_id = None
+        document_metadata = {}
+    else:
+        blob_uri = input_data.get("blob_uri")
+        document_id = input_data.get("document_id")
+        document_metadata = {
+            "document_type": input_data.get("document_type", "unknown"),
+            "document_name": input_data.get("document_name", ""),
+            "document_year": input_data.get("document_year", ""),
+            "document_entity": input_data.get("document_entity", ""),
+            "source_uri": blob_uri,
+            "document_id": document_id
+        }
+        # Add any additional metadata
+        if "metadata" in input_data and isinstance(input_data["metadata"], dict):
+            document_metadata.update(input_data["metadata"])
+    
     logger.info(f"Starting document processing for blob: {blob_uri}")
     
     try:
@@ -34,8 +55,17 @@ def orchestrator_function(context: df.DurableOrchestrationContext) -> List[Dict[
         })
         logger.info(f"Extracted {len(raw_text)} characters of text")
         
-        # Step 3: Chunk the text
-        chunks = yield context.call_activity("ChunkText", raw_text)
+        # Step 3: Chunk the text with metadata
+        chunk_input = {
+            "text": raw_text,
+            "document_type": document_metadata.get("document_type", "unknown"),
+            "document_name": document_metadata.get("document_name", ""),
+            "document_year": document_metadata.get("document_year", ""),
+            "document_entity": document_metadata.get("document_entity", ""),
+            "source_uri": blob_uri,
+            "document_id": document_id
+        }
+        chunks = yield context.call_activity("ChunkText", chunk_input)
         logger.info(f"Created {len(chunks)} chunks")
         
         # Step 4: Generate embeddings for chunks
@@ -43,7 +73,11 @@ def orchestrator_function(context: df.DurableOrchestrationContext) -> List[Dict[
         logger.info(f"Generated embeddings for {len(chunks_with_embeddings)} chunks")
         
         # Step 5: Push chunks to search index
-        yield context.call_activity("PushIndex", chunks_with_embeddings)
+        push_input = {
+            "chunks": chunks_with_embeddings,
+            "document_id": document_id
+        }
+        yield context.call_activity("PushIndex", push_input)
         logger.info(f"Successfully pushed {len(chunks_with_embeddings)} chunks to index")
         
         return chunks_with_embeddings

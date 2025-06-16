@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 
 from core.config import settings
 from core.logging import setup_logging
-from api.v1 import health, chat, feedback
+from api.v1 import health, chat, feedback, document
 
 # Setup logging
 setup_logging()
@@ -77,6 +77,7 @@ async def log_requests(request: Request, call_next):
 app.include_router(health.router, prefix="/api/v1", tags=["health"])
 app.include_router(chat.router, prefix="/api/v1", tags=["chat"])
 app.include_router(feedback.router, prefix="/api/v1", tags=["feedback"])
+app.include_router(document.router, prefix="/api/v1", tags=["documents"])
 
 
 # Root endpoint

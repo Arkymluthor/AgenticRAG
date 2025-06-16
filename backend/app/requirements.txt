@@ -15,8 +15,11 @@ celery>=5.2.7
 
 # Azure Services
 azure-storage-blob>=12.14.0
+azure-storage-table>=2.1.0
 azure-identity>=1.12.0
 azure-core>=1.26.0
+azure-functions>=1.12.0
+azure-durable-functions>=1.2.0
 
 # Data Processing
 numpy>=1.24.0
