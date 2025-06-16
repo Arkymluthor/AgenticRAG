@@ -1,137 +1,231 @@
-import json
 import logging
-from typing import List, Optional, Dict, Any
+import json
+import time
+from typing import List, Dict, Any, Optional
 import aioredis
-from datetime import datetime, timedelta
+from fastapi import Depends
 
-from app.core.config import settings
-from app.schemas.chat import Message
+from core.config import settings
 
 logger = logging.getLogger(__name__)
 
 
-class RedisStore:
+class RedisConversationStore:
     """
-    Redis-based storage for conversation history and other application data.
+    Redis-based implementation of conversation history storage.
+    Stores conversation turns as JSON in Redis lists.
     """
-    def __init__(self):
-        """
-        Initialize Redis connection.
-        """
-        self.redis = None
-        self.expiry_time = timedelta(days=30)  # Default TTL for conversation data
+    _instance = None
     
-    async def _get_connection(self) -> aioredis.Redis:
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super(RedisConversationStore, cls).__new__(cls)
+            cls._instance.redis = None
+            cls._instance.initialized = False
+        return cls._instance
+    
+    async def initialize(self):
         """
-        Get or create Redis connection.
+        Initialize the Redis connection.
         """
-        if self.redis is None:
-            try:
-                connection_kwargs = {
-                    "host": settings.REDIS_HOST,
-                    "port": settings.REDIS_PORT,
-                    "db": settings.REDIS_DB,
-                }
-                
-                if settings.REDIS_PASSWORD:
-                    connection_kwargs["password"] = settings.REDIS_PASSWORD
-                
-                self.redis = await aioredis.create_redis_pool(**connection_kwargs)
-                logger.info("Redis connection established")
-            except Exception as e:
-                logger.exception(f"Failed to connect to Redis: {str(e)}")
-                raise
+        if self.initialized:
+            return
         
-        return self.redis
+        try:
+            # Get Redis connection details from settings
+            redis_url = settings.REDIS_URL
+            
+            # Create Redis connection
+            self.redis = await aioredis.from_url(
+                redis_url,
+                encoding="utf-8",
+                decode_responses=True
+            )
+            
+            self.initialized = True
+            logger.info("Redis conversation store initialized")
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize Redis connection: {str(e)}")
+            raise
     
     async def close(self):
         """
-        Close Redis connection.
+        Close the Redis connection.
         """
-        if self.redis is not None:
-            self.redis.close()
-            await self.redis.wait_closed()
+        if self.redis:
+            await self.redis.close()
             self.redis = None
-            logger.info("Redis connection closed")
+            self.initialized = False
     
-    async def store_conversation_history(self, conversation_id: str, messages: List[Message]):
+    async def save_turn(self, session_id: str, role: str, content: Dict[str, Any]) -> None:
         """
-        Store conversation history in Redis.
+        Save a conversation turn to Redis.
+        
+        Args:
+            session_id: Session identifier
+            role: Role of the message sender ('user' or 'assistant')
+            content: Message content and metadata
         """
-        redis = await self._get_connection()
+        if not self.initialized:
+            await self.initialize()
         
         try:
-            # Convert messages to JSON-serializable format
-            serialized_messages = []
-            for msg in messages:
-                # Convert datetime to ISO format string for JSON serialization
-                msg_dict = msg.dict()
-                if isinstance(msg_dict["timestamp"], datetime):
-                    msg_dict["timestamp"] = msg_dict["timestamp"].isoformat()
-                serialized_messages.append(msg_dict)
+            # Create a key for the conversation
+            conversation_key = f"conversation:{session_id}"
             
-            # Store in Redis with expiry
-            key = f"conversation:{conversation_id}"
-            await redis.set(key, json.dumps(serialized_messages))
-            await redis.expire(key, int(self.expiry_time.total_seconds()))
+            # Create a turn object
+            turn = {
+                "role": role,
+                "content": content,
+                "timestamp": time.time()
+            }
             
-            logger.debug(f"Stored {len(messages)} messages for conversation {conversation_id}")
+            # Serialize the turn to JSON
+            turn_json = json.dumps(turn)
+            
+            # Add the turn to the conversation list
+            await self.redis.rpush(conversation_key, turn_json)
+            
+            # Set expiration on the conversation (30 days)
+            await self.redis.expire(conversation_key, 60 * 60 * 24 * 30)
+            
+            logger.debug(f"Saved turn for session {session_id}")
+            
         except Exception as e:
-            logger.exception(f"Error storing conversation history: {str(e)}")
+            logger.error(f"Error saving conversation turn: {str(e)}")
             raise
     
-    async def get_conversation_history(self, conversation_id: str) -> List[Message]:
+    async def fetch_history(self, session_id: str, n: int = 5) -> List[Dict[str, Any]]:
         """
-        Retrieve conversation history from Redis.
+        Fetch the last n turns of conversation history.
+        
+        Args:
+            session_id: Session identifier
+            n: Number of turns to fetch (default: 5)
+            
+        Returns:
+            List of conversation turns
         """
-        redis = await self._get_connection()
+        if not self.initialized:
+            await self.initialize()
         
         try:
-            key = f"conversation:{conversation_id}"
-            data = await redis.get(key)
+            # Create a key for the conversation
+            conversation_key = f"conversation:{session_id}"
             
-            if not data:
-                logger.debug(f"No history found for conversation {conversation_id}")
-                return []
+            # Get the length of the list
+            list_length = await self.redis.llen(conversation_key)
             
-            # Parse JSON and convert back to Message objects
-            messages_data = json.loads(data)
-            messages = []
+            # Calculate the start index
+            start_index = max(0, list_length - n)
             
-            for msg_data in messages_data:
-                # Convert ISO timestamp string back to datetime
-                if "timestamp" in msg_data and isinstance(msg_data["timestamp"], str):
-                    try:
-                        msg_data["timestamp"] = datetime.fromisoformat(msg_data["timestamp"].replace("Z", "+00:00"))
-                    except ValueError:
-                        # If parsing fails, use current time
-                        msg_data["timestamp"] = datetime.utcnow()
-                
-                messages.append(Message(**msg_data))
+            # Get the last n turns
+            turn_jsons = await self.redis.lrange(conversation_key, start_index, -1)
             
-            logger.debug(f"Retrieved {len(messages)} messages for conversation {conversation_id}")
-            return messages
+            # Parse the turns
+            turns = []
+            for turn_json in turn_jsons:
+                try:
+                    turn = json.loads(turn_json)
+                    turns.append(turn)
+                except json.JSONDecodeError:
+                    logger.warning(f"Failed to parse turn JSON: {turn_json}")
+            
+            logger.debug(f"Fetched {len(turns)} turns for session {session_id}")
+            return turns
+            
         except Exception as e:
-            logger.exception(f"Error retrieving conversation history: {str(e)}")
+            logger.error(f"Error fetching conversation history: {str(e)}")
             return []
     
-    async def delete_conversation(self, conversation_id: str) -> bool:
+    async def store_turn(
+        self, 
+        session_id: str, 
+        user_message: str, 
+        assistant_message: str,
+        sources: Optional[List[Dict[str, Any]]] = None,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> None:
         """
-        Delete a conversation from Redis.
-        """
-        redis = await self._get_connection()
+        Store a complete conversation turn (user message and assistant response).
         
-        try:
-            key = f"conversation:{conversation_id}"
-            deleted = await redis.delete(key)
-            success = deleted > 0
+        Args:
+            session_id: Session identifier
+            user_message: User's message text
+            assistant_message: Assistant's response text
+            sources: Optional list of sources used for the response
+            metadata: Optional additional metadata
+        """
+        # Store user message
+        user_content = {
+            "text": user_message,
+            "timestamp": time.time()
+        }
+        await self.save_turn(session_id, "user", user_content)
+        
+        # Store assistant message
+        assistant_content = {
+            "text": assistant_message,
+            "sources": sources or [],
+            "metadata": metadata or {},
+            "timestamp": time.time()
+        }
+        await self.save_turn(session_id, "assistant", assistant_content)
+    
+    async def get_history(self, session_id: str) -> List[Dict[str, Any]]:
+        """
+        Get the full conversation history for a session.
+        
+        Args:
+            session_id: Session identifier
             
-            if success:
-                logger.info(f"Deleted conversation {conversation_id}")
-            else:
-                logger.warning(f"Conversation {conversation_id} not found for deletion")
+        Returns:
+            List of conversation turns in a format suitable for agents
+        """
+        # Fetch raw turns
+        raw_turns = await self.fetch_history(session_id, n=100)  # Get up to 100 turns
+        
+        # Format turns for agent consumption
+        formatted_turns = []
+        for turn in raw_turns:
+            role = turn.get("role")
+            content = turn.get("content", {})
             
-            return success
-        except Exception as e:
-            logger.exception(f"Error deleting conversation: {str(e)}")
-            return False
+            if role == "user":
+                formatted_turns.append({
+                    "user_message": content.get("text", ""),
+                    "timestamp": content.get("timestamp")
+                })
+            elif role == "assistant":
+                # Find the previous turn (should be a user message)
+                if formatted_turns and "user_message" in formatted_turns[-1]:
+                    # Add assistant message to the same turn
+                    formatted_turns[-1]["assistant_message"] = content.get("text", "")
+                    formatted_turns[-1]["sources"] = content.get("sources", [])
+                    formatted_turns[-1]["metadata"] = content.get("metadata", {})
+                    formatted_turns[-1]["assistant_timestamp"] = content.get("timestamp")
+                else:
+                    # No matching user message, create a new turn
+                    formatted_turns.append({
+                        "assistant_message": content.get("text", ""),
+                        "sources": content.get("sources", []),
+                        "metadata": content.get("metadata", {}),
+                        "timestamp": content.get("timestamp")
+                    })
+        
+        return formatted_turns
+
+
+# FastAPI dependency
+async def get_conversation_store() -> RedisConversationStore:
+    """
+    FastAPI dependency for the RedisConversationStore singleton.
+    """
+    store = RedisConversationStore()
+    await store.initialize()
+    try:
+        yield store
+    finally:
+        # No need to close here as we want to keep the singleton alive
+        pass

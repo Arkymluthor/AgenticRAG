@@ -3,16 +3,16 @@ import httpx
 import json
 from typing import Dict, Any, List, Optional
 
-from app.agents.base import BaseAgent
-from app.core.config import settings
+from agents.base import BaseAgent
+from core.config import settings
 
 logger = logging.getLogger(__name__)
 
 
 class ApplicationAgent(BaseAgent):
     """
-    Agent specialized in handling application-specific queries.
-    Uses retrieval to provide accurate information about the application.
+    Agent specialized in answering application-specific questions.
+    Uses retrieval to provide well-informed responses.
     """
     # Filter for application-related documents
     FILTER = "category eq 'application'"
@@ -95,10 +95,9 @@ class ApplicationAgent(BaseAgent):
             
             # Prepare the prompt
             system_prompt = (
-                "You are an AI assistant specialized in providing information about our application. "
-                "Use the provided context from our documentation to answer questions accurately. "
-                "If the information isn't in the context, say you don't have that specific information "
-                "rather than making up details. Always cite your sources when using retrieved information."
+                "You are an AI assistant specialized in answering questions about the application. "
+                "Provide accurate, helpful information based on the context provided. "
+                "If you don't know the answer, say so clearly rather than making up information."
             )
             
             messages = [
@@ -113,22 +112,32 @@ class ApplicationAgent(BaseAgent):
                 messages.append({
                     "role": "system",
                     "content": (
-                        "Here is relevant information from our documentation to help answer the user's question. "
-                        "Use this information to provide an accurate response.\n\n" + context_text
+                        "Here is relevant information to help answer the question:\n\n" + context_text
                     )
                 })
             
             # Add the current message
             messages.append({"role": "user", "content": message})
             
-            # Prepare the API request
-            url = f"{settings.OPENAI_API_BASE}/openai/deployments/{settings.CHAT_MODEL_DEPLOYMENT}/chat/completions?api-version={settings.OPENAI_API_VERSION}"
+            # Determine which API to use
+            use_azure = settings.USE_AZURE_OPENAI
             
-            headers = {
-                "Content-Type": "application/json",
-                "api-key": settings.OPENAI_API_KEY,
-            }
+            if use_azure:
+                # Azure OpenAI API
+                url = f"{settings.AZURE_OPENAI_ENDPOINT}/openai/deployments/{settings.AZURE_OPENAI_CHAT_DEPLOYMENT}/chat/completions?api-version={settings.AZURE_OPENAI_API_VERSION}"
+                headers = {
+                    "Content-Type": "application/json",
+                    "api-key": settings.AZURE_OPENAI_KEY,
+                }
+            else:
+                # OpenAI API
+                url = f"{settings.OPENAI_API_BASE}/chat/completions"
+                headers = {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
+                }
             
+            # Common payload
             payload = {
                 "messages": messages,
                 "temperature": 0.7,
@@ -137,6 +146,10 @@ class ApplicationAgent(BaseAgent):
                 "frequency_penalty": 0,
                 "presence_penalty": 0,
             }
+            
+            # Add model parameter for OpenAI API
+            if not use_azure:
+                payload["model"] = settings.OPENAI_CHAT_MODEL
             
             # Make the API call
             async with httpx.AsyncClient() as client:
@@ -167,8 +180,8 @@ class ApplicationAgent(BaseAgent):
             
             # Create a fallback response
             fallback_message = (
-                "I'm sorry, I encountered an error while retrieving information about the application. "
-                "Please try again or contact support if the issue persists."
+                "I'm sorry, I encountered an error while processing your request. "
+                "Please try again with more details or contact support if the issue persists."
             )
             
             # Store the interaction

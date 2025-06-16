@@ -1,5 +1,5 @@
 import logging
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 import httpx
 import json
 from fastapi import Depends
@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 class KeywordExtractor:
     """
     Extracts keywords from text using a large language model.
+    Supports both OpenAI API and Azure OpenAI API.
     Implemented as a singleton via FastAPI dependency injection.
     """
     _instance = None
@@ -30,16 +31,26 @@ class KeywordExtractor:
         if self.initialized:
             return
         
-        self.api_key = settings.OPENAI_API_KEY
-        self.api_base = settings.OPENAI_API_BASE
-        self.api_version = settings.OPENAI_API_VERSION
-        self.model_deployment = settings.CHAT_MODEL_DEPLOYMENT
+        # Determine which API to use
+        self.use_azure = settings.USE_AZURE_OPENAI
+        
+        if self.use_azure:
+            # Azure OpenAI API settings
+            self.api_key = settings.AZURE_OPENAI_KEY
+            self.api_base = settings.AZURE_OPENAI_ENDPOINT
+            self.api_version = settings.AZURE_OPENAI_API_VERSION
+            self.model_deployment = settings.AZURE_OPENAI_CHAT_DEPLOYMENT
+        else:
+            # OpenAI API settings
+            self.api_key = settings.OPENAI_API_KEY
+            self.api_base = settings.OPENAI_API_BASE
+            self.model = settings.OPENAI_CHAT_MODEL
         
         # Create a persistent HTTP client
         self.client = httpx.AsyncClient(timeout=30.0)
         self.initialized = True
         
-        logger.info("KeywordExtractor initialized")
+        logger.info(f"KeywordExtractor initialized using {'Azure OpenAI' if self.use_azure else 'OpenAI'} API")
     
     async def close(self):
         """
@@ -67,8 +78,9 @@ class KeywordExtractor:
         if not text:
             return []
         
-        if not self.api_key or not self.api_base:
-            logger.error("OpenAI API key or base URL not configured")
+        if (self.use_azure and (not self.api_key or not self.api_base)) or \
+           (not self.use_azure and not self.api_key):
+            logger.error("API key or base URL not configured")
             return []
         
         try:
@@ -77,19 +89,31 @@ class KeywordExtractor:
             
             user_prompt = f"Extract {max_k} keywords from the following text:\n\n{text}"
             
-            # Prepare the API request
-            url = f"{self.api_base}/openai/deployments/{self.model_deployment}/chat/completions?api-version={self.api_version}"
+            # Prepare the messages
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
             
-            headers = {
-                "Content-Type": "application/json",
-                "api-key": self.api_key,
-            }
+            # Prepare the API request based on the API type
+            if self.use_azure:
+                # Azure OpenAI API
+                url = f"{self.api_base}/openai/deployments/{self.model_deployment}/chat/completions?api-version={self.api_version}"
+                headers = {
+                    "Content-Type": "application/json",
+                    "api-key": self.api_key,
+                }
+            else:
+                # OpenAI API
+                url = f"{self.api_base}/chat/completions"
+                headers = {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self.api_key}",
+                }
             
+            # Common payload
             payload = {
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
+                "messages": messages,
                 "temperature": 0.3,
                 "max_tokens": 50,
                 "top_p": 1.0,
@@ -97,6 +121,10 @@ class KeywordExtractor:
                 "presence_penalty": 0.0,
                 "stop": None
             }
+            
+            # Add model parameter for OpenAI API
+            if not self.use_azure:
+                payload["model"] = self.model
             
             # Make the API call
             response = await self.client.post(url, headers=headers, json=payload)

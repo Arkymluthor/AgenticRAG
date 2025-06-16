@@ -1,47 +1,22 @@
-from typing import Optional
-from pydantic import BaseModel, Field, validator
+from typing import Optional, Dict, Any
+from pydantic import BaseModel, Field
 
 
 class FeedbackRequest(BaseModel):
     """
     Request model for feedback endpoint.
     """
-    conversation_id: str
-    message_id: str
-    rating: int
-    comments: Optional[str] = None
-    
-    @validator("rating")
-    def validate_rating(cls, v):
-        """
-        Validate that rating is between 1 and 5.
-        """
-        if v < 1 or v > 5:
-            raise ValueError("Rating must be between 1 and 5")
-        return v
-    
-    class Config:
-        schema_extra = {
-            "example": {
-                "conversation_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-                "message_id": "123e4567-e89b-12d3-a456-426614174001",
-                "rating": 5,
-                "comments": "Very helpful response with good sources"
-            }
-        }
+    session_id: str = Field(..., description="Session identifier")
+    message_id: str = Field(..., description="Message identifier")
+    rating: int = Field(..., description="Rating (1-5)", ge=1, le=5)
+    comment: Optional[str] = Field(None, description="Optional comment")
+    metadata: Optional[Dict[str, Any]] = Field(None, description="Optional metadata")
 
 
 class FeedbackResponse(BaseModel):
     """
     Response model for feedback endpoint.
     """
-    success: bool
-    message: str
-    
-    class Config:
-        schema_extra = {
-            "example": {
-                "success": True,
-                "message": "Feedback received successfully"
-            }
-        }
+    success: bool = Field(..., description="Whether the feedback was successfully recorded")
+    feedback_id: str = Field(..., description="Feedback identifier")
+    message: str = Field("Feedback recorded", description="Response message")

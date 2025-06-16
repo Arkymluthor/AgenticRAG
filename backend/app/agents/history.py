@@ -3,8 +3,8 @@ import httpx
 import json
 from typing import Dict, Any, List, Optional
 
-from app.agents.base import BaseAgent
-from app.core.config import settings
+from agents.base import BaseAgent
+from core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -95,13 +95,23 @@ class HistoryAgent(BaseAgent):
                 "If the question cannot be answered from history, respond with EXACTLY 'None'."
             )
             
-            # Prepare the API request
-            url = f"{settings.OPENAI_API_BASE}/openai/deployments/{settings.CHAT_MODEL_DEPLOYMENT}/chat/completions?api-version={settings.OPENAI_API_VERSION}"
+            # Determine which API to use
+            use_azure = settings.USE_AZURE_OPENAI
             
-            headers = {
-                "Content-Type": "application/json",
-                "api-key": settings.OPENAI_API_KEY,
-            }
+            if use_azure:
+                # Azure OpenAI API
+                url = f"{settings.AZURE_OPENAI_ENDPOINT}/openai/deployments/{settings.AZURE_OPENAI_CHAT_DEPLOYMENT}/chat/completions?api-version={settings.AZURE_OPENAI_API_VERSION}"
+                headers = {
+                    "Content-Type": "application/json",
+                    "api-key": settings.AZURE_OPENAI_KEY,
+                }
+            else:
+                # OpenAI API
+                url = f"{settings.OPENAI_API_BASE}/chat/completions"
+                headers = {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
+                }
             
             messages = [
                 {"role": "system", "content": system_prompt},
@@ -116,6 +126,7 @@ class HistoryAgent(BaseAgent):
                 "content": f"Based on the conversation history above, can you answer this question: '{message}'? If yes, provide the answer. If no, respond with EXACTLY 'None'."
             })
             
+            # Common payload
             payload = {
                 "messages": messages,
                 "temperature": 0.3,
@@ -124,6 +135,10 @@ class HistoryAgent(BaseAgent):
                 "frequency_penalty": 0,
                 "presence_penalty": 0,
             }
+            
+            # Add model parameter for OpenAI API
+            if not use_azure:
+                payload["model"] = settings.OPENAI_CHAT_MODEL
             
             # Make the API call
             async with httpx.AsyncClient() as client:

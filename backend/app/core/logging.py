@@ -1,25 +1,34 @@
-import json
 import logging
 import sys
+import json
+import os
 from datetime import datetime
-from typing import Any, Dict, Optional
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+import traceback
 
-from app.core.config import settings
+from opencensus.ext.azure.log_exporter import AzureLogHandler
+from core.config import settings
 
-try:
-    from opencensus.ext.azure.log_exporter import AzureLogHandler
-    AZURE_AVAILABLE = True
-except ImportError:
-    AZURE_AVAILABLE = False
+# Create logs directory if it doesn't exist
+logs_dir = Path(settings.BASE_DIR) / "logs"
+logs_dir.mkdir(exist_ok=True)
 
 
 class JsonFormatter(logging.Formatter):
     """
-    Custom JSON formatter for structured logging.
+    Formatter that outputs JSON strings after parsing the log record.
     """
-    def format(self, record: logging.LogRecord) -> str:
-        log_data: Dict[str, Any] = {
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+    def __init__(self, **kwargs):
+        self.fmt_dict = kwargs
+    
+    def format(self, record):
+        record_dict = self._prepare_log_dict(record)
+        return json.dumps(record_dict)
+    
+    def _prepare_log_dict(self, record):
+        record_dict = {
+            "timestamp": datetime.utcfromtimestamp(record.created).isoformat(),
             "level": record.levelname,
             "name": record.name,
             "message": record.getMessage(),
@@ -27,53 +36,58 @@ class JsonFormatter(logging.Formatter):
         
         # Add exception info if available
         if record.exc_info:
-            log_data["exception"] = self.formatException(record.exc_info)
+            record_dict["exception"] = {
+                "type": record.exc_info[0].__name__,
+                "message": str(record.exc_info[1]),
+                "traceback": traceback.format_exception(*record.exc_info)
+            }
         
-        # Add extra fields from record
-        if hasattr(record, "extra") and record.extra:
-            log_data.update(record.extra)
+        # Add extra fields
+        if hasattr(record, "extra"):
+            for key, value in record.extra.items():
+                record_dict[key] = value
         
-        return json.dumps(log_data)
+        return record_dict
 
 
-def setup_logging(level: Optional[str] = None) -> None:
+def setup_logging():
     """
-    Set up structured JSON logging to stdout and optionally to Azure App Insights.
+    Configure logging for the application.
     """
-    log_level = getattr(logging, level or settings.LOG_LEVEL)
-    
-    # Configure root logger
+    # Get root logger
     root_logger = logging.getLogger()
-    root_logger.setLevel(log_level)
+    root_logger.setLevel(logging.INFO)
     
-    # Clear existing handlers
+    # Remove existing handlers
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
     
-    # Add stdout handler with JSON formatting
-    stdout_handler = logging.StreamHandler(sys.stdout)
-    stdout_handler.setFormatter(JsonFormatter())
-    root_logger.addHandler(stdout_handler)
+    # Create console handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(JsonFormatter())
+    root_logger.addHandler(console_handler)
     
-    # Add Azure App Insights handler if available and configured
-    if AZURE_AVAILABLE and settings.APPINSIGHTS_INSTRUMENTATION_KEY:
-        azure_handler = AzureLogHandler(
-            connection_string=f"InstrumentationKey={settings.APPINSIGHTS_INSTRUMENTATION_KEY}"
-        )
-        azure_handler.setFormatter(JsonFormatter())
+    # Create file handler
+    file_handler = RotatingFileHandler(
+        logs_dir / "app.log",
+        maxBytes=10485760,  # 10 MB
+        backupCount=5
+    )
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(JsonFormatter())
+    root_logger.addHandler(file_handler)
+    
+    # Add Azure Application Insights handler if configured
+    if settings.APPINSIGHTS_CONNECTION_STRING:
+        azure_handler = AzureLogHandler(connection_string=settings.APPINSIGHTS_CONNECTION_STRING)
+        azure_handler.setLevel(logging.INFO)
         root_logger.addHandler(azure_handler)
     
-    # Suppress noisy loggers
-    logging.getLogger("azure").setLevel(logging.WARNING)
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    # Set log levels for specific loggers
+    logging.getLogger("uvicorn").setLevel(logging.WARNING)
+    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+    logging.getLogger("uvicorn.error").setLevel(logging.WARNING)
     
     # Log startup message
-    logging.info(
-        "Logging initialized",
-        extra={
-            "app_name": settings.PROJECT_NAME,
-            "version": settings.VERSION,
-            "log_level": settings.LOG_LEVEL,
-            "app_insights_enabled": AZURE_AVAILABLE and bool(settings.APPINSIGHTS_INSTRUMENTATION_KEY),
-        },
-    )
+    root_logger.info("Logging configured")

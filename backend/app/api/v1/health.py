@@ -1,30 +1,45 @@
-from fastapi import APIRouter, Depends
-from pydantic import BaseModel
-import logging
+from fastapi import APIRouter, Depends, HTTPException, status
+from typing import Dict, Any
 
-from app.core.config import settings
-
-router = APIRouter(tags=["health"])
-logger = logging.getLogger(__name__)
+router = APIRouter()
 
 
-class HealthResponse(BaseModel):
-    """Health check response model."""
-    status: str
-    version: str
-    environment: str
-
-
-@router.get("/healthz", response_model=HealthResponse)
-async def health_check():
+@router.get("/healthz", summary="Liveness probe")
+async def health_check() -> Dict[str, str]:
     """
-    Health check endpoint.
-    Returns basic application information and status.
-    """
-    logger.info("Health check requested")
+    Health check endpoint for Kubernetes liveness probe.
     
-    return HealthResponse(
-        status="healthy",
-        version=settings.VERSION,
-        environment="development",  # This would typically be set from an env var
-    )
+    Returns:
+        Dictionary with status "ok"
+    """
+    return {"status": "ok"}
+
+
+@router.post("/ingest", summary="Manual document ingestion")
+async def manual_ingest(blob_uri: str) -> Dict[str, Any]:
+    """
+    Manual kick-off for document ingestion.
+    This endpoint is for admin tooling only.
+    
+    Args:
+        blob_uri: URI of the blob to ingest
+        
+    Returns:
+        Dictionary with ingestion status
+    """
+    try:
+        # In a real implementation, this would trigger the DocIngestOrchestrator
+        # For now, we just return a success response
+        
+        return {
+            "status": "accepted",
+            "message": "Document ingestion started",
+            "blob_uri": blob_uri,
+            "job_id": "123456"  # In a real implementation, this would be a real job ID
+        }
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to start document ingestion: {str(e)}"
+        )

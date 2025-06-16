@@ -1,7 +1,7 @@
 import logging
-from typing import List, Dict, Any, Optional
-import httpx
 import json
+import httpx
+from typing import List, Dict, Any, Optional
 from fastapi import Depends
 
 from app.core.config import settings
@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 class VectorSearchClient:
     """
     Client for Azure Cognitive Search with vector search capabilities.
+    Supports both OpenAI API and Azure OpenAI API for embeddings.
     Implemented as a singleton via FastAPI dependency injection.
     """
     _instance = None
@@ -20,6 +21,7 @@ class VectorSearchClient:
         if cls._instance is None:
             cls._instance = super(VectorSearchClient, cls).__new__(cls)
             cls._instance.client = None
+            cls._instance.embedding_client = None
             cls._instance.initialized = False
             cls._instance._endpoint = endpoint
             cls._instance._key = key
@@ -50,20 +52,100 @@ class VectorSearchClient:
         self.api_key = self._key or settings.SEARCH_API_KEY
         self.index_name = settings.SEARCH_INDEX_NAME
         
-        # Create a persistent HTTP client
+        # Determine which API to use for embeddings
+        self.use_azure = settings.USE_AZURE_OPENAI
+        
+        if self.use_azure:
+            # Azure OpenAI API settings
+            self.embedding_api_key = settings.AZURE_OPENAI_KEY
+            self.embedding_api_base = settings.AZURE_OPENAI_ENDPOINT
+            self.embedding_api_version = settings.AZURE_OPENAI_API_VERSION
+            self.embedding_deployment = settings.AZURE_OPENAI_EMBEDDING_DEPLOYMENT
+        else:
+            # OpenAI API settings
+            self.embedding_api_key = settings.OPENAI_API_KEY
+            self.embedding_api_base = settings.OPENAI_API_BASE
+            self.embedding_model = settings.OPENAI_EMBEDDING_MODEL
+        
+        # Create persistent HTTP clients
         self.client = httpx.AsyncClient(timeout=30.0)
+        self.embedding_client = httpx.AsyncClient(timeout=30.0)
         self.initialized = True
         
         logger.info(f"VectorSearchClient initialized for index {self.index_name}")
+        logger.info(f"Using {'Azure OpenAI' if self.use_azure else 'OpenAI'} API for embeddings")
     
     async def close(self):
         """
-        Close the HTTP client.
+        Close the HTTP clients.
         """
         if self.client:
             await self.client.aclose()
             self.client = None
-            self.initialized = False
+        
+        if self.embedding_client:
+            await self.embedding_client.aclose()
+            self.embedding_client = None
+            
+        self.initialized = False
+    
+    async def generate_embedding(self, text: str) -> List[float]:
+        """
+        Generate an embedding for the given text.
+        
+        Args:
+            text: Text to generate embedding for
+            
+        Returns:
+            Embedding vector
+        """
+        if not self.initialized:
+            await self.initialize()
+        
+        try:
+            # Prepare the API request based on the API type
+            if self.use_azure:
+                # Azure OpenAI API
+                url = f"{self.embedding_api_base}/openai/deployments/{self.embedding_deployment}/embeddings?api-version={self.embedding_api_version}"
+                headers = {
+                    "Content-Type": "application/json",
+                    "api-key": self.embedding_api_key,
+                }
+            else:
+                # OpenAI API
+                url = f"{self.embedding_api_base}/embeddings"
+                headers = {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self.embedding_api_key}",
+                }
+            
+            # Common payload
+            payload = {
+                "input": text,
+                "dimensions": 1536  # Default for text-embedding-ada-002
+            }
+            
+            # Add model parameter for OpenAI API
+            if not self.use_azure:
+                payload["model"] = self.embedding_model
+            
+            # Make the API call
+            response = await self.embedding_client.post(url, headers=headers, json=payload)
+            response.raise_for_status()
+            
+            result = response.json()
+            
+            # Extract embedding based on API type
+            if self.use_azure:
+                embedding = result.get("data", [{}])[0].get("embedding", [])
+            else:
+                embedding = result.get("data", [{}])[0].get("embedding", [])
+            
+            return embedding
+            
+        except Exception as e:
+            logger.exception(f"Error generating embedding: {str(e)}")
+            return []
     
     async def search(self, keywords: List[str], filter_expr: str = "", k: int = 10) -> List[Dict[str, Any]]:
         """
@@ -158,17 +240,15 @@ class VectorSearchClient:
     
     async def search_hybrid(
         self, 
-        keywords: List[str], 
-        vector_query: List[float],
+        text: str,
         filter_expr: str = "", 
         k: int = 10
     ) -> List[Dict[str, Any]]:
         """
-        Perform a hybrid search using both keywords and vector embedding.
+        Perform a hybrid search using both text and vector embedding.
         
         Args:
-            keywords: List of keywords for text search
-            vector_query: Vector embedding for semantic search
+            text: Text to search for
             filter_expr: OData filter expression
             k: Number of results to return
             
@@ -178,11 +258,21 @@ class VectorSearchClient:
         if not self.initialized:
             await self.initialize()
         
+        if not text:
+            return []
+        
         if not self.endpoint or not self.api_key:
             logger.error("Search endpoint or API key not configured")
             return []
         
         try:
+            # Generate embedding for the text
+            vector_query = await self.generate_embedding(text)
+            
+            # Extract keywords from the text (simple approach)
+            keywords = [word.lower() for word in text.split() if len(word) > 3]
+            keywords = list(set(keywords))[:5]  # Deduplicate and limit to 5 keywords
+            
             # Build search query by joining keywords with OR
             search_query = " OR ".join(keywords) if keywords else "*"
             
@@ -209,7 +299,7 @@ class VectorSearchClient:
                 "semanticConfiguration": "default"
             }
             
-            # Add vector search if provided
+            # Add vector search if we have an embedding
             if vector_query:
                 payload["vectors"] = [
                     {
