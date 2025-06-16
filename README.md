@@ -21,6 +21,7 @@ The backend consists of the following components:
 - Azure OpenAI API key or OpenAI API key
 - Azure Cognitive Search instance (optional)
 - Redis (included in Docker Compose)
+- python-multipart package (required for document upload functionality)
 
 ### Environment Variables
 
@@ -87,6 +88,9 @@ func start
 - `POST /api/v1/feedback`: Submit feedback for a message.
 - `GET /api/v1/healthz`: Health check endpoint.
 - `POST /api/v1/ingest`: Manually trigger document ingestion.
+- `POST /api/v1/documents/ingest`: Ingest a document with base64-encoded content.
+- `POST /api/v1/documents/upload`: Upload a document file using multipart/form-data (requires python-multipart).
+- `GET /api/v1/documents/{document_id}`: Get information about a specific document.
 
 ## Development
 
